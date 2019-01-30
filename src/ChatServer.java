@@ -14,6 +14,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Queue;
+import java.util.ArrayList;
+import java.util.LinkedList;
 
 public class ChatServer {
     private static final Charset utf8 = Charset.forName("UTF-8");
@@ -43,6 +46,7 @@ public class ChatServer {
     private final int port;
     private final Map<String,ChatState> stateByName
         = new HashMap<String,ChatState>();
+    private Threadpool threadpool = new Threadpool(8);
 
     /**
      * Constructs a new {@link ChatServer} that will service requests
@@ -55,18 +59,17 @@ public class ChatServer {
 
     /**
      * Starts the server. You want to add any multithreading server
-     * startup code here.  
+     * startup code here.
      */
     public void runForever() throws IOException {
         @SuppressWarnings("resource")
 	final ServerSocket server = new ServerSocket(port);
         while (true) {
             final Socket connection = server.accept();
-
-            handle(connection);
+            threadpool.schedule(connection);
         }
     }
-    
+
     private static String replaceEmptyWithDefaultRoom(final String room) {
     	if (room.isEmpty()) {
     		return DEFAULT_ROOM;
@@ -76,7 +79,7 @@ public class ChatServer {
 
     /**
      * Handles a request from the client. This method already parses HTTP
-     * requests and calls the corresponding ChatState methods for you. 
+     * requests and calls the corresponding ChatState methods for you.
      */
     private void handle(final Socket connection) throws IOException {
         try {
@@ -108,7 +111,7 @@ public class ChatServer {
         	connection.close();
         }
     }
-    
+
     /**
      * Writes a minimal but valid HTTP response to
      * <code>output</code>.
@@ -131,10 +134,13 @@ public class ChatServer {
     }
 
     private ChatState getState(final String room) {
-        ChatState state = stateByName.get(room);
-        if (state == null) {
-            state = new ChatState(room);
-            stateByName.put(room, state);
+      ChatState state;
+      synchronized(stateByName) {
+          state = stateByName.get(room);
+          if (state == null) {
+              state = new ChatState(room);
+              stateByName.put(room, state);
+          }
         }
         return state;
     }
@@ -155,5 +161,61 @@ public class ChatServer {
     public static void main(final String[] args) throws IOException {
         final int port = args.length == 0 ? 8080 : Integer.parseInt(args[0]);
         new ChatServer(port).runForever();
+    }
+
+    public class Threadpool {
+      private int numThreads;
+      private Queue<Socket> workQueue;
+      private ArrayList<WorkerThread> workers;
+
+      public Threadpool(final int numThreads) {
+        this.numThreads = numThreads;
+        workers = new ArrayList<WorkerThread>(numThreads);
+        workQueue = new LinkedList<Socket>();
+
+        for (int i = 0; i < numThreads; i++) {
+          workers.add(new WorkerThread(workQueue));
+          workers.get(i).start();
+        }
+      }
+
+      public void schedule(final Socket connection) {
+        synchronized(workQueue) {
+          workQueue.add(connection);
+          workQueue.notify();
+        }
+      }
+
+      class WorkerThread extends Thread {
+        private Queue<Socket> workQueue;
+
+        public WorkerThread(Queue<Socket> workQueue) {
+          this.workQueue = workQueue;
+        }
+
+        public void run() {
+          while (true) {
+            Socket connection;
+            synchronized(workQueue) {
+              while (workQueue.isEmpty()) {
+                try {
+                  workQueue.wait();
+                }
+                catch (InterruptedException e) {
+                  throw new Error("unexpected", e);
+                }
+              }
+              connection = workQueue.poll();
+            }
+
+            try {
+              handle(connection);
+            }
+            catch (IOException e) {
+              throw new Error("unexpected", e);
+            }
+          }
+        }
+      }
     }
 }
